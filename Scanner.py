@@ -1,6 +1,8 @@
 import re
 from typing import Set, Dict, Tuple
 from enum import Enum
+from urllib.parse import parse_qs, urlparse
+import json
 
 class State(Enum):
     # Initial state
@@ -22,28 +24,31 @@ class State(Enum):
     UNION_SPACE = 12
     ALL = 13
     ALL_SPACE = 14
-    SELECT = 15
+    COLORS = 15
     # Stacked query states: ;?\s*(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)
     SEMICOLON = 16
     SPACE_KEYWORD = 17
     KEYWORD = 18
+    KEYWORD_CONFIRM = 19  # Confirm keyword is followed by space and word
 
 class SQLInjectionFSM:
     def __init__(self):
-        # Current states (for non-deterministic simulation)
+        # Current states
         self.current_states: Set[State] = {State.START}
         # Accepting states
         self.accepting_states: Set[State] = {
             State.VALUE2,  # Tautology complete
             State.COMMENT, # -- or /*
             State.SELECT,  # UNION SELECT
-            State.KEYWORD  # Stacked query keyword
+            State.KEYWORD_CONFIRM  # Stacked query keyword with context
         }
         # Character classes
         self.word_chars = set('abcdefghijklmnopqrstuvwxyz0123456789_')
         self.space_chars = set(' \t\n')
         self.digit_chars = set('0123456789')
         self.keywords = {'select', 'insert', 'update', 'delete', 'drop', 'alter', 'create'}
+        # Track current keyword being built
+        self.current_keyword = ''
 
     def transition(self, char: str) -> None:
         """Update current states based on input character."""
@@ -69,7 +74,7 @@ class SQLInjectionFSM:
                 elif char in self.space_chars:
                     next_states.add(State.SPACE_OR_AND)
                 else:
-                    next_states.add(State.SPACE_OR_AND)  # Skip quotes directly to OR/AND
+                    next_states.add(State.SPACE_OR_AND)
                 next_states.add(State.START)
             elif state == State.SPACE_OR_AND:
                 if char in self.space_chars:
@@ -85,7 +90,7 @@ class SQLInjectionFSM:
                 next_states.add(State.START)
             elif state == State.AND:
                 if char == 'n':
-                    next_states.add(State.AND)  # Stay for 'nd'
+                    next_states.add(State.AND)
                 elif char == 'd' and State.AND in self.current_states:
                     next_states.add(State.VALUE1)
                 next_states.add(State.START)
@@ -160,16 +165,28 @@ class SQLInjectionFSM:
                     next_states.add(State.SPACE_KEYWORD)
                 elif char in {'s', 'i', 'u', 'd', 'a', 'c'}:
                     next_states.add(State.KEYWORD)
+                    self.current_keyword = char
                 next_states.add(State.START)
             elif state == State.SPACE_KEYWORD:
                 if char in self.space_chars:
                     next_states.add(State.SPACE_KEYWORD)
                 elif char in {'s', 'i', 'u', 'd', 'a', 'c'}:
                     next_states.add(State.KEYWORD)
+                    self.current_keyword = char
                 next_states.add(State.START)
             elif state == State.KEYWORD:
                 if char in self.word_chars:
-                    next_states.add(State.KEYWORD)
+                    self.current_keyword += char
+                    if self.current_keyword in self.keywords:
+                        next_states.add(State.KEYWORD_CONFIRM)
+                    else:
+                        next_states.add(State.KEYWORD)
+                next_states.add(State.START)
+            elif state == State.KEYWORD_CONFIRM:
+                if char in self.space_chars:
+                    next_states.add(State.KEYWORD_CONFIRM)
+                elif char in self.word_chars:
+                    next_states.add(State.KEYWORD_CONFIRM)  # Accept as part of query
                 next_states.add(State.START)
 
         self.current_states = next_states
@@ -181,33 +198,141 @@ class SQLInjectionFSM:
     def reset(self):
         """Reset FSM to initial state."""
         self.current_states = {State.START}
+        self.current_keyword = ''
 
-def scan_http_request(http_body: str) -> bool:
-    """Scan HTTP request body for SQL injection patterns."""
+def parse_http_request(http_request: str) -> list:
+    """Parse an HTTP request and extract parts to inspect for SQL injection."""
+    parts_to_scan = []
+    
+    # Split request into headers and body
+    try:
+        headers, body = http_request.split('\n\n', 1) if '\n\n' in http_request else (http_request, '')
+    except ValueError:
+        headers, body = http_request, ''
+    
+    # Parse headers
+    header_lines = headers.split('\n')
+    request_line = header_lines[0]
+    
+    # Extract query parameters from URL (GET requests)
+    if ' ' in request_line:
+        method, url, _ = request_line.split(' ', 2)
+        parsed_url = urlparse(url)
+        query_string = parsed_url.query
+        if query_string:
+            parts_to_scan.append(query_string)
+            # Parse query string into key-value pairs
+            query_params = parse_qs(query_string)
+            for key, values in query_params.items():
+                parts_to_scan.extend(values)
+    
+    # Extract body (POST requests)
+    if body:
+        # Handle application/x-www-form-urlencoded
+        if 'Content-Type: application/x-www-form-urlencoded' in headers:
+            parts_to_scan.append(body)
+            # Parse body into key-value pairs
+            body_params = parse_qs(body)
+            for key, values in body_params.items():
+                parts_to_scan.extend(values)
+        # Handle application/json
+        elif 'Content-Type: application/json' in headers:
+            try:
+                json_data = json.loads(body)
+                # Extract all string values from JSON
+                def extract_strings(data):
+                    if isinstance(data, str):
+                        return [data]
+                    elif isinstance(data, dict):
+                        return [s for value in data.values() for s in extract_strings(value)]
+                    elif isinstance(data, list):
+                        return [s for item in data for s in extract_strings(item)]
+                    return []
+                parts_to_scan.extend(extract_strings(json_data))
+            except json.JSONDecodeError:
+                pass
+    
+    # Extract cookies
+    for line in header_lines:
+        if line.lower().startswith('cookie:'):
+            cookie_str = line[len('Cookie:'):].strip()
+            cookies = cookie_str.split(';')
+            for cookie in cookies:
+                if '=' in cookie:
+                    _, value = cookie.split('=', 1)
+                    parts_to_scan.append(value.strip())
+    
+    # Extract specific headers (e.g., User-Agent, Referer)
+    for line in header_lines:
+        if line.lower().startswith(('user-agent:', 'referer:')):
+            _, value = line.split(':', 1)
+            parts_to_scan.append(value.strip())
+    
+    return parts_to_scan
+
+def scan_http_request(http_request: str) -> bool:
+    """Scan HTTP request for SQL injection patterns."""
+    # Normalize input: decode URL-encoded characters
+    def normalize(text):
+        return re.sub(r'%27', "'", re.sub(r'%20', " ", text))
+    
+    # Parse request to get parts to scan
+    parts = parse_http_request(http_request)
+    
+    # Initialize FSM
     fsm = SQLInjectionFSM()
-    for char in http_body:
-        fsm.transition(char)
-        if fsm.is_accepted():
-            return True  # Attack detected
+    
+    # Scan each part
+    for part in parts:
+        normalized_part = normalize(part)
+        for char in normalized_part:
+            fsm.transition(char)
+            if fsm.is_accepted():
+                print(f"Attack detected in: {part}")
+                return True  # Attack detected
+        fsm.reset()  # Reset FSM for next part
+    
     return False  # No attack detected
 
 # Example usage
 if __name__ == "__main__":
-    # Example HTTP request bodies
+    # Example HTTP requests
     test_cases = [
-        # Malicious: Tautology
-        "username=admin&password=' OR '1'='1",
-        # Malicious: Comment
-        "id=1'--",
-        # Malicious: UNION
-        "id=1' UNION SELECT username, password FROM users--",
-        # Malicious: Stacked query
-        "email=test@ex.com'; DROP TABLE users; --",
-        # Legitimate: Contains 'select' but not an attack
-        "description=Please select an option"
+        # Malicious: Tautology in POST body
+        """POST /login HTTP/1.1
+Host: example.com
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 36
+
+username=admin&password=' OR '1'='1""",
+        # Malicious: Comment in query parameter
+        """GET /search?id=1'-- HTTP/1.1
+Host: example.com""",
+        # Malicious: UNION in query parameter
+        """GET /search?id=1' UNION SELECT username, password FROM users-- HTTP/1.1
+Host: example.com""",
+        # Malicious: Stacked query in JSON body
+        """POST /api/update HTTP/1.1
+Host: example.com
+Content-Type: application/json
+Content-Length: 44
+
+{"email": "test@ex.com'; DROP TABLE users; --"}""",
+        # Legitimate: Contains 'select' in body
+        """POST /submit HTTP/1.1
+Host: example.com
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 33
+
+description=Please select an option""",
+        # Malicious: Injection in cookie
+        """GET /profile HTTP/1.1
+Host: example.com
+Cookie: session=abc' OR '1'='1""",
     ]
 
-    for i, body in enumerate(test_cases):
-        result = scan_http_request(body)
-        print(f"Test {i+1}: {body}")
+    for i, request in enumerate(test_cases):
+        result = scan_http_request(request)
+        print(f"Test {i+1}:")
+        print(request)
         print(f"Attack detected: {result}\n")
