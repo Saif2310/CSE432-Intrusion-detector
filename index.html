@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQL Injection Detection</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f4f4f4;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        #test-cases {
+            margin-bottom: 20px;
+        }
+        #test-cases select {
+            width: 100%;
+            padding: 10px;
+            font-size: 16px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+        }
+        #http-request {
+            width: 100%;
+            height: 150px;
+            margin-bottom: 10px;
+            padding: 10px;
+            font-family: 'Courier New', Courier, monospace;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+            background-color: #fff;
+        }
+        #test-button {
+            padding: 10px 20px;
+            background-color: #007BFF;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        #test-button:hover {
+            background-color: #0056b3;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        .malicious {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .safe {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeeba;
+        }
+    </style>
+</head>
+<body>
+    <h1>SQL Injection Detection</h1>
+    <div id="test-cases">
+        <label for="test-case-select">Select Test Case:</label>
+        <select id="test-case-select" onchange="loadTestCase()">
+            <option value="0">Select a test case</option>
+            <option value="1">Test 1: Malicious (Tautology)</option>
+            <option value="2">Test 2: Malicious (Comment)</option>
+            <option value="3">Test 3: Malicious (UNION)</option>
+            <option value="4">Test 4: Malicious (Stacked Query)</option>
+            <option value="5">Test 5: Legitimate</option>
+            <option value="6">Test 6: Malicious (Cookie)</option>
+        </select>
+    </div>
+    <textarea id="http-request" placeholder="Enter HTTP request here"></textarea>
+    <button id="test-button" onclick="testSQLInjection()">Test for SQL Injection</button>
+    <div id="result"></div>
+
+    <script>
+        const testCases = [
+            "",
+            `POST /login HTTP/1.1
+Host: example.com
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 36
+
+username=admin&password=' OR '1'='1`,
+            `GET /search?id=1'-- HTTP/1.1
+Host: example.com`,
+            `GET /search?id=1' UNION SELECT username, password FROM users-- HTTP/1.1
+Host: example.com`,
+            `POST /api/update HTTP/1.1
+Host: example.com
+Content-Type: application/json
+Content-Length: 44
+
+{"email": "test@ex.com'; DROP TABLE users; --"}`,
+            `POST /submit HTTP/1.1
+Host: example.com
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 33
+
+description=Please select an option`,
+            `GET /profile HTTP/1.1
+Host: example.com
+Cookie: session=abc' OR '1'='1`
+        ];
+
+        function loadTestCase() {
+            const select = document.getElementById('test-case-select');
+            const textarea = document.getElementById('http-request');
+            textarea.value = testCases[select.value];
+            document.getElementById('result').innerHTML = '';
+        }
+
+        async function testSQLInjection() {
+            const httpRequest = document.getElementById('http-request').value;
+            const resultDiv = document.getElementById('result');
+
+            if (!httpRequest) {
+                resultDiv.className = 'error';
+                resultDiv.innerHTML = 'Please enter an HTTP request.';
+                return;
+            }
+
+            try {
+                const response = await fetch('http://127.0.0.1:5000/check-sql-injection', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ http_request: httpRequest })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+
+                const data = await response.json();
+                resultDiv.className = data.is_malicious ? 'malicious' : 'safe';
+                resultDiv.innerHTML = data.is_malicious ? 'SQL Injection Detected!' : 'No SQL Injection Detected.';
+            } catch (error) {
+                console.error('Error:', error);
+                resultDiv.className = 'error';
+                resultDiv.innerHTML = 'Error testing request. Falling back to client-side detection.';
+                const isMalicious = simulateDetection(httpRequest);
+                resultDiv.className = isMalicious ? 'malicious' : 'safe';
+                resultDiv.innerHTML = isMalicious ? 'SQL Injection Detected! (Client-side)' : 'No SQL Injection Detected. (Client-side)';
+            }
+        }
+
+        function simulateDetection(httpRequest) {
+            const patterns = [
+                /['"][\s]*(OR|AND)[\s]*['"1=1]/i,
+                /--[\s\S]*$/i,
+                /UNION[\s]+(ALL[\s]+)?SELECT/i,
+                /;[\s]*(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE)/i
+            ];
+            return patterns.some(pattern => pattern.test(httpRequest));
+        }
+    </script>
+</body>
+</html>
