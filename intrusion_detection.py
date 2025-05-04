@@ -295,8 +295,7 @@ Content-Length: 36
 username=admin&password=' OR '1'='1""",
         """GET /search?id=1'-- HTTP/1.1
 Host: example.com""",
-        """GET /search?id=1' UNION SELECT username, password FROM users-- HTTP/1.1
-Host: example.com""",
+        
         """POST /api/update HTTP/1.1
 Host: example.com
 Content-Type: application/json
