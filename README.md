@@ -18,8 +18,7 @@ SQL Injection is a common web security vulnerability that allows attackers to in
 ---
 
 ## 🗂 Project Structure
-sql-injection-fsm/
-│
+
 ├── app.py 
 ├── index.html 
 ├── intrusion_detection.py 
