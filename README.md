@@ -29,7 +29,57 @@ SQL Injection is a common web security vulnerability that allows attackers to in
 
 ## 🛠 How to Run
 
-1. **Make sure Python is installed** (preferably version 3.6 or above).
+Requirements
+------------
+* Python 3.x
+* Flask
+* Flask-CORS
 
-2. pip install flask
-3. pip install flask-cors
+Installation
+------------
+
+1. Install the required Python packages:
+   pip install Flask Flask-CORS
+
+Usage
+-----
+1. Run the Flask application:
+   python app.py
+   The server will start at http://127.0.0.1:5000.
+
+2. Open the index.html file in a web browser.
+
+3. Enter an HTTP request in the text area or select a test case from the dropdown.
+
+4. Click the "Test for SQL Injection" button to analyze the request.
+
+5. The result will be displayed below the button, indicating whether an SQL injection attack was detected.
+
+API Endpoint
+------------
+The system provides an API endpoint for programmatic access:
+
+* Endpoint: http://127.0.0.1:5000/check-sql-injection
+* Method: POST
+* Request Body (JSON):
+  {
+      "http_request": "The HTTP request string to analyze"
+  }
+* Response (JSON):
+  {
+      "is_malicious": true/false,
+      "status": "success/error",
+      "message": "Error message (if status is error)"
+  }
+
+Files
+-----
+* app.py:  Flask application that handles the API requests.
+* index.html:  HTML file for the user interface.
+* intrusion_detection.py:  Python file containing the SQL injection detection logic using the Finite State Machine.
+
+Notes
+-----
+* The FSM is designed to detect common SQL injection patterns. It may not detect all possible attack variations.
+* This system is intended as a first line of defense and should be used in conjunction with other security measures.
+* The client-side detection in index.html is a simplified simulation and should not be relied upon for production use. The server-side detection using the FSM is the primary detection mechanism.
